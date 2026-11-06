@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Client, StreamedSpanEnvelope } from '../../../../src';
-import { SentrySpan, setCurrentClient, SpanBuffer } from '../../../../src';
+import { SentrySpan, setCurrentClient, SpanBuffer, startInactiveSpan } from '../../../../src';
 import type { SerializedStreamedSpanWithSegmentSpan } from '../../../../src/tracing/spans/captureSpan';
+import { captureSpan } from '../../../../src/tracing/spans/captureSpan';
 import { getDefaultTestClientOptions, TestClient } from '../../../mocks/client';
-import { HTTP_METHOD, URL_FULL } from '@sentry/conventions/attributes';
+import { HTTP_METHOD, SENTRY_SEGMENT_NAME, URL_FULL } from '@sentry/conventions/attributes';
 
 describe('SpanBuffer', () => {
   let client: TestClient;
@@ -271,6 +272,34 @@ describe('SpanBuffer', () => {
     buffer.flush('trace1');
 
     expect(sendEnvelopeSpy).not.toHaveBeenCalled();
+  });
+
+  it('uses the segment span\u2019s current name for spans captured before it was renamed', () => {
+    const buffer = new SpanBuffer(client);
+
+    const rootSpan = startInactiveSpan({ name: 'GET' });
+    const childSpan = startInactiveSpan({ name: 'early child', parentSpan: rootSpan });
+    childSpan.end();
+
+    const capturedChild = captureSpan(childSpan, client);
+    // The child was captured before the rename, so it carries the old segment name
+    expect(capturedChild.attributes[SENTRY_SEGMENT_NAME]).toEqual({ type: 'string', value: 'GET' });
+
+    rootSpan.updateName('GET /users/:id');
+
+    // Note: the root span is intentionally not ended here. Ending it would send a static
+    // transaction event through this test's client and is not needed to reproduce the issue:
+    // the rename already happened while the child was buffered.
+    buffer.add(capturedChild);
+    buffer.add(captureSpan(rootSpan, client));
+    buffer.drain();
+
+    expect(sendEnvelopeSpy).toHaveBeenCalledTimes(1);
+    const items = sentEnvelopes[0]?.[1]?.[0]?.[1]?.items ?? [];
+    const sentChild = items.find(item => item.name === 'early child');
+    const sentRoot = items.find(item => item.name === 'GET /users/:id');
+    expect(sentChild?.attributes[SENTRY_SEGMENT_NAME]).toEqual({ type: 'string', value: 'GET /users/:id' });
+    expect(sentRoot?.attributes[SENTRY_SEGMENT_NAME]).toEqual({ type: 'string', value: 'GET /users/:id' });
   });
 
   describe('weight-based flushing', () => {

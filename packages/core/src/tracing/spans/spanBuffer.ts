@@ -2,11 +2,13 @@ import type { Client } from '../../client';
 import { DEBUG_BUILD } from '../../debug-build';
 import type { SerializedStreamedSpan } from '../../types/span';
 import { debug } from '../../utils/debug-logger';
+import { spanToJSON } from '../../utils/spanUtils';
 import { safeUnref } from '../../utils/timer';
 import { getDynamicSamplingContextFromSpan } from '../dynamicSamplingContext';
 import type { SerializedStreamedSpanWithSegmentSpan } from './captureSpan';
 import { createStreamedSpanEnvelope } from './envelope';
 import { estimateSerializedSpanSizeInBytes } from './estimateSize';
+import { SENTRY_SEGMENT_NAME } from '@sentry/conventions/attributes';
 
 /**
  * We must not send more than 1000 spans in one envelope.
@@ -168,9 +170,17 @@ export class SpanBuffer {
 
     const dsc = getDynamicSamplingContextFromSpan(segmentSpan);
 
+    // The segment span may have been renamed after child spans were captured, so use its current
+    // name for every buffered span instead of the name stamped at capture time.
+    const segmentName = spanToJSON(segmentSpan).name;
+
     const cleanedSpans: SerializedStreamedSpan[] = spans.map(spanJSON => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { _segmentSpan, ...cleanSpanJSON } = spanJSON;
+      cleanSpanJSON.attributes = {
+        ...cleanSpanJSON.attributes,
+        [SENTRY_SEGMENT_NAME]: { type: 'string', value: segmentName },
+      };
       return cleanSpanJSON;
     });
 
